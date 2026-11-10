@@ -7,6 +7,7 @@
 #include <qml/backendexecutor.h>
 
 #include <common/messages.h>
+#include <common/paymentdestination.h>
 #include <qml/bitcoinamount.h>
 #include <qml/models/addresslistmodel.h>
 #include <qml/models/paymentrequest.h>
@@ -230,7 +231,7 @@ std::optional<CTxDestination> PreviewChangeDestination(const OutputType change_t
 void ApplyPreviewChangeDestination(wallet::CCoinControl& coin_control, const OutputType change_type)
 {
     if (const auto destination = PreviewChangeDestination(change_type)) {
-        coin_control.destChange = *destination;
+        coin_control.destChange = PaymentDestination{*destination};
     }
 }
 
@@ -321,7 +322,7 @@ util::Result<wallet::CreatedTransactionResult> CreateSendAllTransaction(
         tx.vin.emplace_back(input, CScript{}, sequence);
     }
     CAmount fixed_amount{0};
-    std::set<CTxDestination> destinations;
+    std::set<PaymentDestination> destinations;
     for (size_t i = 0; i < recipients.size(); ++i) {
         const auto& recipient = recipients[i];
         if (!destinations.insert(recipient.dest).second) {
@@ -329,7 +330,9 @@ util::Result<wallet::CreatedTransactionResult> CreateSendAllTransaction(
         }
         const CAmount amount = static_cast<int>(i) == remainder_index ? 0 : recipient.nAmount;
         fixed_amount += amount;
-        tx.vout.emplace_back(amount, GetScriptForDestination(recipient.dest));
+        const auto script = recipient.dest.GetStaticScript();
+        if (!script) return util::Error{Untranslated("Unable to prepare a send-all transaction.")};
+        tx.vout.emplace_back(amount, *script);
     }
     const auto size = wallet::CalculateMaximumSignedTxSize(CTransaction(tx), wallet);
     if (size.vsize < 0) return util::Error{Untranslated("Unable to determine the transaction size.")};
@@ -389,7 +392,7 @@ std::optional<SendFeePreview> EstimateInsufficientSelectedInputsFee(
     CAmount send_amount{0};
     for (const auto& recipient : recipients) {
         send_amount += recipient.nAmount;
-        tx.vout.emplace_back(recipient.nAmount, GetScriptForDestination(recipient.dest));
+        tx.vout.push_back(wallet::GetDummyTxOut(recipient.dest, recipient.nAmount));
     }
     const auto size = wallet::CalculateMaximumSignedTxSize(CTransaction(tx), wallet, &control);
     if (size.vsize < 0) return std::nullopt;
@@ -497,7 +500,7 @@ std::optional<std::vector<wallet::CRecipient>> BuildRecipients(const SendRecipie
             return std::nullopt;
         }
 
-        vec_send.push_back({destination, recipient->cAmount(), false});
+        vec_send.push_back({PaymentDestination{destination}, recipient->cAmount(), false});
     }
 
     if (vec_send.empty()) {

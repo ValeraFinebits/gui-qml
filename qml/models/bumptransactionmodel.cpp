@@ -114,8 +114,9 @@ void BumpTransactionModel::prepareFeeBump(const QString& txid, unsigned int targ
     CAmount old_fee{0};
     CAmount new_fee{0};
     CMutableTransaction mtx;
+    std::vector<bip352::SilentPaymentsDestination> sp_recipients;
 
-    if (!m_wallet->createBumpTransaction(Txid::FromUint256(*parsed), coin_control, errors, old_fee, new_fee, mtx)) {
+    if (!m_wallet->createBumpTransaction(Txid::FromUint256(*parsed), coin_control, errors, old_fee, new_fee, mtx, sp_recipients)) {
         setError(errors.empty() ? tr("Failed to create bump transaction.") : QString::fromStdString(errors[0].translated));
         return;
     }
@@ -124,6 +125,7 @@ void BumpTransactionModel::prepareFeeBump(const QString& txid, unsigned int targ
     m_old_fee = old_fee;
     m_new_fee = new_fee;
     m_bump_mtx = std::move(mtx);
+    m_sp_recipients = std::move(sp_recipients);
 
     setState(NeedsConfirmation);
     Q_EMIT resultChanged();
@@ -181,7 +183,7 @@ bool BumpTransactionModel::confirmFeeBumpInternal(std::optional<SecureString> pa
 
     std::vector<bilingual_str> errors;
     Txid bumped_txid;
-    if (!m_wallet->commitBumpTransaction(m_original_txid, std::move(m_bump_mtx), errors, bumped_txid)) {
+    if (!m_wallet->commitBumpTransaction(m_original_txid, std::move(m_bump_mtx), errors, bumped_txid, m_sp_recipients)) {
         relock_guard.relock();
         setError(errors.empty() ? tr("Failed to commit transaction.") : QString::fromStdString(errors[0].translated));
         return false;
@@ -233,6 +235,7 @@ void BumpTransactionModel::reset()
     m_old_fee = 0;
     m_new_fee = 0;
     m_bump_mtx = CMutableTransaction{};
+    m_sp_recipients.clear();
     m_original_txid = Txid{};
     m_new_txid.clear();
     m_error.clear();

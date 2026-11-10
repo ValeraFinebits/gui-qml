@@ -5,6 +5,7 @@
 #ifndef BITCOIN_QML_MODELS_BUMPTRANSACTIONMODEL_H
 #define BITCOIN_QML_MODELS_BUMPTRANSACTIONMODEL_H
 
+#include <common/bip352.h>
 #include <consensus/amount.h>
 #include <primitives/transaction.h>
 #include <support/allocators/secure.h>
@@ -85,6 +86,7 @@ private:
     CAmount m_old_fee{0};
     CAmount m_new_fee{0};
     CMutableTransaction m_bump_mtx;
+    std::vector<bip352::SilentPaymentsDestination> m_sp_recipients;
     Txid m_original_txid;
     QString m_new_txid;
     QString m_error;

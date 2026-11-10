@@ -38,7 +38,7 @@ private Q_SLOTS:
     {
         auto wallet = MakeBumpableWallet();
         wallet->create_bump_transaction_fn = [](const Txid&, const wallet::CCoinControl&, std::vector<bilingual_str>&,
-                                                CAmount& old_fee, CAmount& new_fee, CMutableTransaction&) {
+                                                CAmount& old_fee, CAmount& new_fee, CMutableTransaction&, std::vector<bip352::SilentPaymentsDestination>&) {
             old_fee = 500;
             new_fee = 1000;
             return true;
@@ -57,7 +57,7 @@ private Q_SLOTS:
     {
         auto wallet = MakeBumpableWallet();
         wallet->create_bump_transaction_fn = [](const Txid&, const wallet::CCoinControl&, std::vector<bilingual_str>&,
-                                                CAmount& old_fee, CAmount& new_fee, CMutableTransaction&) {
+                                                CAmount& old_fee, CAmount& new_fee, CMutableTransaction&, std::vector<bip352::SilentPaymentsDestination>&) {
             old_fee = 500;
             new_fee = 1000;
             return true;
@@ -75,7 +75,7 @@ private Q_SLOTS:
     {
         auto wallet = MakeBumpableWallet();
         wallet->create_bump_transaction_fn = [](const Txid&, const wallet::CCoinControl&, std::vector<bilingual_str>& errors,
-                                                CAmount&, CAmount&, CMutableTransaction&) {
+                                                CAmount&, CAmount&, CMutableTransaction&, std::vector<bip352::SilentPaymentsDestination>&) {
             errors.emplace_back(Untranslated("insufficient fee"));
             return false;
         };
@@ -109,14 +109,22 @@ private Q_SLOTS:
     void confirmFeeBump_signsAndCommits()
     {
         auto wallet = MakeBumpableWallet();
-        wallet->create_bump_transaction_fn = [](const Txid&, const wallet::CCoinControl&, std::vector<bilingual_str>&,
-                                                CAmount& old_fee, CAmount& new_fee, CMutableTransaction&) {
+        const auto pubkey = XOnlyPubKey::NUMS_H.GetEvenCorrespondingCPubKey();
+        const auto destination = bip352::SilentPaymentsDestination::From(pubkey, pubkey);
+        QVERIFY(destination.has_value());
+        const std::vector<bip352::SilentPaymentsDestination> expected_recipients{*destination};
+        bool recipients_committed{false};
+        wallet->create_bump_transaction_fn = [&](const Txid&, const wallet::CCoinControl&, std::vector<bilingual_str>&,
+                                                 CAmount& old_fee, CAmount& new_fee, CMutableTransaction&, std::vector<bip352::SilentPaymentsDestination>& sp_recipients) {
             old_fee = 500;
             new_fee = 1000;
+            sp_recipients = expected_recipients;
             return true;
         };
         wallet->sign_bump_transaction_fn = [](CMutableTransaction&) { return true; };
-        wallet->commit_bump_transaction_fn = [](const Txid&, CMutableTransaction&&, std::vector<bilingual_str>&, Txid& bumped_txid) {
+        wallet->commit_bump_transaction_fn = [&](const Txid&, CMutableTransaction&&, std::vector<bilingual_str>&, Txid& bumped_txid,
+                                                 const std::vector<bip352::SilentPaymentsDestination>& sp_recipients) {
+            recipients_committed = sp_recipients == expected_recipients;
             bumped_txid = Txid::FromUint256(*uint256::FromHex("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
             return true;
         };
@@ -129,13 +137,14 @@ private Q_SLOTS:
 
         QCOMPARE(model.state(), BumpTransactionModel::Succeeded);
         QVERIFY(!model.newTxid().isEmpty());
+        QVERIFY(recipients_committed);
     }
 
     void confirmFeeBump_signFailureDoesNotCommit()
     {
         auto wallet = MakeBumpableWallet();
         wallet->create_bump_transaction_fn = [](const Txid&, const wallet::CCoinControl&, std::vector<bilingual_str>&,
-                                                CAmount& old_fee, CAmount& new_fee, CMutableTransaction&) {
+                                                CAmount& old_fee, CAmount& new_fee, CMutableTransaction&, std::vector<bip352::SilentPaymentsDestination>&) {
             old_fee = 500;
             new_fee = 1000;
             return true;
@@ -165,7 +174,7 @@ private Q_SLOTS:
     {
         auto wallet = MakeBumpableWallet();
         wallet->create_bump_transaction_fn = [](const Txid&, const wallet::CCoinControl&, std::vector<bilingual_str>&,
-                                                CAmount& old_fee, CAmount& new_fee, CMutableTransaction&) {
+                                                CAmount& old_fee, CAmount& new_fee, CMutableTransaction&, std::vector<bip352::SilentPaymentsDestination>&) {
             old_fee = 500;
             new_fee = 1000;
             return true;
@@ -184,7 +193,7 @@ private Q_SLOTS:
     {
         auto wallet = MakeBumpableWallet();
         wallet->create_bump_transaction_fn = [](const Txid&, const wallet::CCoinControl&, std::vector<bilingual_str>&,
-                                                CAmount& old_fee, CAmount& new_fee, CMutableTransaction&) {
+                                                CAmount& old_fee, CAmount& new_fee, CMutableTransaction&, std::vector<bip352::SilentPaymentsDestination>&) {
             old_fee = 500;
             new_fee = 1000;
             return true;
