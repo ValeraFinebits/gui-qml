@@ -11,12 +11,12 @@
 #include <support/allocators/secure.h>
 #include <uint256.h>
 
+#include <QObject>
+#include <QString>
+
 #include <functional>
 #include <optional>
 #include <vector>
-
-#include <QObject>
-#include <QString>
 
 namespace interfaces {
 class Wallet;

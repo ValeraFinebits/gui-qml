@@ -128,6 +128,7 @@ private:
         int blocks_to_maturity{0};
         int block_height{0};
         bool status_known{false};
+        bool rbf_needs_sp_outputs{false};
         CTransactionRef transaction;
         // Compact ownership flags let a detail preview use the cached
         // transaction without another wallet read or address-book scan.

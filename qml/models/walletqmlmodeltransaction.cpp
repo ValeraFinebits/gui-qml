@@ -4,15 +4,16 @@
 
 #include <qml/models/walletqmlmodeltransaction.h>
 
+#include <addresstype.h>
+#include <common/paymentdestination.h>
+#include <key_io.h>
 #include <qml/bitcoinunits.h>
 #include <qml/models/sendrecipient.h>
 #include <qml/models/sendrecipientslistmodel.h>
 
-#include <key_io.h>
-#include <addresstype.h>
+#include <QVariantMap>
 
 #include <algorithm>
-#include <QVariantMap>
 
 WalletQmlModelTransaction::WalletQmlModelTransaction(const SendRecipientsListModel* recipient, QObject* parent)
     : QObject(parent),
@@ -107,7 +108,7 @@ bool WalletQmlModelTransaction::isReviewedRecipient(const QString& address) cons
     });
 }
 
-bool WalletQmlModelTransaction::captureReviewedRecipients(const SendRecipientsListModel& recipients)
+bool WalletQmlModelTransaction::captureReviewedRecipients(const SendRecipientsListModel& recipients, std::optional<unsigned int> change_pos)
 {
     if (!m_wtx) return false;
     std::vector<ReviewedRecipient> snapshot;
@@ -115,16 +116,23 @@ bool WalletQmlModelTransaction::captureReviewedRecipients(const SendRecipientsLi
     for (const auto* recipient : recipients.recipients()) {
         if (!recipient) return false;
         const QString address = recipient->address()->address();
-        const CTxDestination destination = DecodeDestination(address.toStdString());
-        if (!IsValidDestination(destination)) return false;
-        const CScript script = GetScriptForDestination(destination);
+        const auto destination = PaymentDestination::FromString(address.toStdString());
+        if (!destination) return false;
         size_t match = m_wtx->vout.size();
-        for (size_t i = 0; i < m_wtx->vout.size(); ++i) {
-            if (used[i] || m_wtx->vout[i].scriptPubKey != script) continue;
-            if (match == m_wtx->vout.size()) match = i;
-            if (m_wtx->vout[i].nValue == recipient->cAmount()) {
-                match = i;
-                break;
+        if (destination->IsSilentPayment()) {
+            // TODO: Support multiple recipients with Silent Payments in GUI review.
+            if (recipients.count() != 1 || m_wtx->vout.size() != 1U + change_pos.has_value() || (change_pos && *change_pos >= m_wtx->vout.size())) return false;
+            match = change_pos == 0 ? 1 : 0;
+            if (m_wtx->vout[match].nValue != recipient->cAmount() || !m_wtx->vout[match].scriptPubKey.IsPayToTaproot()) return false;
+        } else {
+            const CScript script = *destination->GetStaticScript();
+            for (size_t i = 0; i < m_wtx->vout.size(); ++i) {
+                if (used[i] || m_wtx->vout[i].scriptPubKey != script) continue;
+                if (match == m_wtx->vout.size()) match = i;
+                if (m_wtx->vout[i].nValue == recipient->cAmount()) {
+                    match = i;
+                    break;
+                }
             }
         }
         if (match == m_wtx->vout.size()) return false;

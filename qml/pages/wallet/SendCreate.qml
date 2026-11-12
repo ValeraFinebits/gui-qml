@@ -1048,6 +1048,9 @@ PageStack {
                                 footerText: !root.wallet ? ""
                                     : root.wallet.feeEstimatePending ? qsTr("Estimating…")
                                     : root.wallet.estimatedFeeSatoshi >= 0 ? ""
+                                    : root.wallet.recipients.allValid && root.recipient && root.recipient.isSilentPayment
+                                        //: Explains the deferred fee calculation for a valid Silent Payments send. The fee is shown on the review screen before sending.
+                                        ? qsTr("For silent payments, the fee is calculated when preparing the transaction for review.")
                                     : root.wallet.recipients.allValid ? qsTr("Fee estimate unavailable")
                                     : qsTr("Enter a valid recipient address and amount to estimate the fee")
                                 SendFeeSelection { Layout.fillWidth: true; walletModel: root.wallet; onFeeChanged: root.clearPrepareTransactionError() }

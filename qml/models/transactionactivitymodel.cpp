@@ -314,11 +314,14 @@ TransactionActivityModel::Snapshot TransactionActivityModel::readSnapshot(
     interfaces::Wallet& wallet, Snapshot snapshot, const Work& work, const std::atomic_bool& cancelled)
 {
     const auto read_record = [&](const interfaces::WalletTx& wtx) {
+        // TODO: Expose persisted SP destinations in activity details and search,
+        // accounting for SP change rather than treating every destination as a recipient.
         auto activity = TransactionActivity::fromWalletTx(wtx);
         if (!activity) return;
         Record record = snapshot.records.value(activity->txid);
         record.activity = std::move(*activity);
         record.transaction = wtx.tx;
+        record.rbf_needs_sp_outputs = wtx.rbf_needs_sp_outputs;
         record.inputs_mine = wtx.txin_is_mine;
         record.outputs_mine = wtx.txout_is_mine;
         record.outputs_change = wtx.txout_is_change;
@@ -414,7 +417,7 @@ TransactionActivityModel::Snapshot TransactionActivityModel::readSnapshot(
         }
     }
     const auto& record = snapshot.records[snapshot.detail_txid];
-    if (record.status_known && record.status == Transaction::Unconfirmed && record.activity.replaced_by_txid.isEmpty()) {
+    if (record.status_known && record.status == Transaction::Unconfirmed && record.activity.replaced_by_txid.isEmpty() && !record.rbf_needs_sp_outputs) {
         snapshot.can_bump = wallet.transactionCanBeBumped(Txid::FromUint256(*hash));
     }
     return snapshot;

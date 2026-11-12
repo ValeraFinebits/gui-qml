@@ -101,6 +101,13 @@ void BumpTransactionModel::prepareFeeBump(const QString& txid, unsigned int targ
         setError(tr("Invalid transaction ID."));
         return;
     }
+    // TODO: Support Silent Payments RBF in the GUI.
+    if (m_wallet->getWalletTx(Txid::FromUint256(*parsed)).rbf_needs_sp_outputs) {
+        //: Error shown when attempting to increase the fee of a transaction using the Silent Payments protocol.
+        //: Increasing its fee is not available in this interface.
+        setError(tr("Fee bumping silent payments is not supported yet."));
+        return;
+    }
 
     setActionType(SpeedUp);
     setNeedsUnlock(false);

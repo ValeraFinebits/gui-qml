@@ -21,7 +21,7 @@ BitcoinUriParseResult BuildError(const QString& message)
 }
 
 struct Tr {
-    static QString tr(const char* s) { return QCoreApplication::translate("BitcoinUri", s); }
+    Q_DECLARE_TR_FUNCTIONS(BitcoinUri)
 };
 } // namespace
 
@@ -43,6 +43,18 @@ BitcoinUriParseResult BitcoinUri::Parse(const QString& uri_text)
         return BuildError(Tr::tr("Not a valid Bitcoin payment URI."));
     }
 
+    const QUrlQuery query(uri);
+    const auto items = query.queryItems(QUrl::FullyDecoded);
+    // TODO: Support BIP321 SP payment instructions with and without a fallback address.
+    for (const auto& item : items) {
+        if (item.first.compare(QLatin1String("sp"), Qt::CaseInsensitive) == 0 ||
+            item.first.compare(QLatin1String("req-sp"), Qt::CaseInsensitive) == 0) {
+            //: Error shown when importing a URI containing Silent Payments instructions.
+            //: The user can still enter the Silent Payments address directly in the recipient field.
+            return BuildError(Tr::tr("Silent payment requests are not supported yet. Enter the silent payment address directly."));
+        }
+    }
+
     BitcoinUriParseResult result;
     result.address = uri.path();
     if (result.address.endsWith('/')) {
@@ -54,8 +66,6 @@ BitcoinUriParseResult BitcoinUri::Parse(const QString& uri_text)
         return BuildError(Tr::tr("Not a valid Bitcoin address."));
     }
 
-    const QUrlQuery query(uri);
-    const auto items = query.queryItems(QUrl::FullyDecoded);
     for (const auto& item : items) {
         QString key = item.first;
         const QString value = item.second;
