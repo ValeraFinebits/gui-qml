@@ -122,6 +122,8 @@ Q_SIGNALS:
 private:
     struct Record {
         TransactionActivity activity;
+        QString silent_payment_address;
+        QString comment;
         QStringList labels;
         int status{Transaction::Unconfirmed};
         int depth{0};

@@ -59,6 +59,7 @@ public:
     bool needsUnlock() const { return m_needs_unlock; }
 
     Q_INVOKABLE void prepareFeeBump(const QString& txid, unsigned int targetBlocks);
+    Q_INVOKABLE bool prepareFeeBumpWithPassphrase(const QString& txid, unsigned int targetBlocks, const QString& passphrase);
     Q_INVOKABLE bool confirmFeeBump();
     Q_INVOKABLE bool confirmFeeBumpWithPassphrase(const QString& passphrase);
     Q_INVOKABLE void reset();
@@ -76,8 +77,9 @@ private:
     void setError(const QString& error);
     void setNeedsUnlock(bool needs_unlock);
     void setUnlockRequired(const QString& error);
+    bool prepareFeeBumpInternal(const QString& txid, unsigned int target_blocks, std::optional<SecureString> passphrase);
     bool confirmFeeBumpInternal(std::optional<SecureString> passphrase);
-    bool unlockForCommit(std::optional<SecureString>& passphrase, bool& relock);
+    bool unlockForAction(std::optional<SecureString>& passphrase, bool& relock);
 
     interfaces::Wallet* m_wallet{nullptr};
     std::function<void()> m_security_state_changed_fn;
@@ -91,6 +93,7 @@ private:
     QString m_new_txid;
     QString m_error;
     bool m_needs_unlock{false};
+    bool m_bump_signed{false};
 };
 
 #endif // BITCOIN_QML_MODELS_BUMPTRANSACTIONMODEL_H

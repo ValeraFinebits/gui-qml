@@ -4,12 +4,16 @@
 
 #include <qml/models/transactionactivitymodel.h>
 
+#include <chainparams.h>
+#include <common/bip352.h>
+#include <core_io.h>
+#include <key_io.h>
 #include <qml/bitcoinunits.h>
 #include <qml/models/transactionflow.h>
 #include <qml/models/walletqmlmodel.h>
-
-#include <core_io.h>
-#include <key_io.h>
+#include <sync.h>
+#include <wallet/transaction.h>
+#include <wallet/wallet.h>
 
 #include <QDateTime>
 
@@ -19,6 +23,27 @@
 namespace {
 using Type = TransactionActivity::Type;
 using Direction = TransactionAction::Direction;
+
+QString SingleSilentPaymentAddress(interfaces::Wallet& wallet, const interfaces::WalletTx& wtx, const TransactionActivity& activity)
+{
+    if (activity.actions.size() != 1) return {};
+    const auto& action = activity.actions.front();
+    if (action.direction != Direction::Send || action.source != TransactionAction::Source::Output || action.output_index < 0) return {};
+    const auto output_index = static_cast<size_t>(action.output_index);
+    if (output_index >= wtx.tx->vout.size() || !wtx.tx->vout[output_index].scriptPubKey.IsPayToTaproot()) return {};
+    for (size_t i{0}; i < wtx.tx->vout.size(); ++i) {
+        if (i != output_index && (!wtx.txout_is_mine[i] || !wtx.txout_is_change[i])) return {};
+    }
+
+    // TODO: Read durable SP history metadata through interfaces::Wallet.
+    // Core deletes replaced transactions' RBF recipient records.
+    auto* backend = wallet.wallet();
+    if (!backend) return {};
+    LOCK(backend->cs_wallet);
+    const auto* wallet_tx = backend->GetWalletTx(wtx.tx->GetHash());
+    if (!wallet_tx || wallet_tx->m_sprecipients.size() != 1) return {};
+    return QString::fromStdString(bip352::EncodeSilentPaymentsAddress(wallet_tx->m_sprecipients.front(), Params()));
+}
 
 int LegacyType(Type type)
 {
@@ -116,7 +141,9 @@ void TransactionActivityModel::updateLabels(interfaces::Wallet& wallet, Record& 
 {
     record.labels.clear();
     for (const auto& action : record.activity.actions) {
-        record.labels.append(AddressLabel(wallet, action.address));
+        const bool use_comment = !record.comment.isEmpty() && record.activity.actions.size() == 1 &&
+                                 action.direction == Direction::Send && action.source == TransactionAction::Source::Output;
+        record.labels.append(use_comment ? record.comment : AddressLabel(wallet, action.address));
     }
 }
 
@@ -314,12 +341,13 @@ TransactionActivityModel::Snapshot TransactionActivityModel::readSnapshot(
     interfaces::Wallet& wallet, Snapshot snapshot, const Work& work, const std::atomic_bool& cancelled)
 {
     const auto read_record = [&](const interfaces::WalletTx& wtx) {
-        // TODO: Expose persisted SP destinations in activity details and search,
-        // accounting for SP change rather than treating every destination as a recipient.
+        // TODO: Handle multiple SP recipients and SP change.
         auto activity = TransactionActivity::fromWalletTx(wtx);
         if (!activity) return;
         Record record = snapshot.records.value(activity->txid);
         record.activity = std::move(*activity);
+        record.silent_payment_address = SingleSilentPaymentAddress(wallet, wtx, record.activity);
+        record.comment = wtx.comment ? QString::fromStdString(*wtx.comment) : QString{};
         record.transaction = wtx.tx;
         record.rbf_needs_sp_outputs = wtx.rbf_needs_sp_outputs;
         record.inputs_mine = wtx.txin_is_mine;
@@ -417,7 +445,9 @@ TransactionActivityModel::Snapshot TransactionActivityModel::readSnapshot(
         }
     }
     const auto& record = snapshot.records[snapshot.detail_txid];
-    if (record.status_known && record.status == Transaction::Unconfirmed && record.activity.replaced_by_txid.isEmpty() && !record.rbf_needs_sp_outputs) {
+    const bool supported_sp = !record.silent_payment_address.isEmpty() && !wallet.privateKeysDisabled() && !wallet.hasExternalSigner();
+    if (record.status_known && record.status == Transaction::Unconfirmed && record.activity.replaced_by_txid.isEmpty() &&
+        (!record.rbf_needs_sp_outputs || supported_sp)) {
         snapshot.can_bump = wallet.transactionCanBeBumped(Txid::FromUint256(*hash));
     }
     return snapshot;
@@ -459,8 +489,10 @@ void TransactionActivityModel::rebuildRows()
         QVariantList requests;
         QSet<QString> request_ids;
         QStringList search{tx.txid};
+        if (!record.silent_payment_address.isEmpty()) search << record.silent_payment_address;
         for (size_t i = 0; i < tx.actions.size(); ++i) {
             const auto& action = tx.actions[i];
+            const QString& address = record.silent_payment_address.isEmpty() ? action.address : record.silent_payment_address;
             const bool receive = action.direction == Direction::Receive;
             // Associate requests with owned outputs, never an external send or
             // the aggregate wallet-input contribution of a mixed transaction.
@@ -487,11 +519,17 @@ void TransactionActivityModel::rebuildRows()
                 inputs.append(QVariantMap{{"txid", QString::fromStdString(input.hash.ToString())}, {"outputIndex", input.n}});
             }
             actions.append(QVariantMap{
-                {"actionId", action.id}, {"direction", static_cast<int>(action.direction)},
-                {"source", static_cast<int>(action.source)}, {"outputIndex", action.output_index},
-                {"inputs", inputs}, {"address", action.address}, {"label", label},
-                {"amountSat", qint64(action.amount)}, {"amount", formatAmount(action.amount, receive)},
-                {"paymentRequests", matches}, {"hasPaymentRequest", !matches.isEmpty()},
+                {"actionId", action.id},
+                {"direction", static_cast<int>(action.direction)},
+                {"source", static_cast<int>(action.source)},
+                {"outputIndex", action.output_index},
+                {"inputs", inputs},
+                {"address", address},
+                {"label", label},
+                {"amountSat", qint64(action.amount)},
+                {"amount", formatAmount(action.amount, receive)},
+                {"paymentRequests", matches},
+                {"hasPaymentRequest", !matches.isEmpty()},
             });
             search << action.address << label << record.labels.at(i);
         }
@@ -616,6 +654,7 @@ QVariantMap TransactionActivityModel::transactionDetails(const QString& txid, bo
         for (auto it = names.cbegin(); it != names.cend(); ++it) result.insert(QString::fromUtf8(it.value()), row.value(it.key()));
         const auto& record = m_transactions[txid];
         result.insert("blockHeight", record.status_known && record.depth > 0 ? QVariant{record.block_height} : QVariant{});
+        result.insert("silentPaymentAddress", record.silent_payment_address);
         if (!include_flow) return result;
         if (m_detail_txid != txid) return result;
         result.insert("detailsLoading", m_details_loading);
@@ -623,6 +662,12 @@ QVariantMap TransactionActivityModel::transactionDetails(const QString& txid, bo
         result.insert("canBump", m_detail_can_bump && !result.value("isInactive").toBool());
         if (m_detail_flow.isEmpty()) return result;
         QVariantMap flow = m_detail_flow;
+        const auto& actions = record.activity.actions;
+        const TransactionAction* note_action{nullptr};
+        if (!record.comment.isEmpty() && actions.size() == 1 &&
+            actions.front().direction == Direction::Send && actions.front().source == TransactionAction::Source::Output) {
+            note_action = &actions.front();
+        }
         for (const QString& side : {QStringLiteral("inputs"), QStringLiteral("outputs")}) {
             QVariantList entries;
             for (const auto& value : flow.value(side).toList()) {
@@ -635,6 +680,9 @@ QVariantMap TransactionActivityModel::transactionDetails(const QString& txid, bo
                 entry.insert("paymentRequests", requests);
                 entry.insert("label", !requests.isEmpty() ? requests.first().toMap().value("noteSelf").toString()
                     : !output || !mine ? m_detail_labels.value(address) : QString{});
+                if (output && note_action && entry.contains("index") && entry.value("index").toInt() == note_action->output_index) {
+                    entry.insert("label", record.comment);
+                }
                 entry.insert("amount", entry.value("amountKnown").toBool()
                     ? formatAmount(entry.value("amountSat").toLongLong(), false) : QString{});
                 entries.append(entry);

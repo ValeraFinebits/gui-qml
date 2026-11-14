@@ -230,6 +230,19 @@ Page {
                     message: qsTr("This mining reward will be spendable after %1 more blocks.").arg(root.transactionData.blocksToMaturity || 0)
                 }
 
+                FormRow {
+                    objectName: "transactionSilentPaymentAddressRow"
+                    Layout.fillWidth: true
+                    implicitWidth: 0
+                    visible: !!root.transactionData.silentPaymentAddress
+                    //: Label above the original Silent Payments recipient address in transaction details.
+                    title: qsTr("Silent payment address")
+                    bodyItem: AddressLabel {
+                        objectName: "transactionSilentPaymentAddress"
+                        Layout.fillWidth: true
+                        address: root.transactionData.silentPaymentAddress || ""
+                    }
+                }
                 TransactionFlow {
                     objectName: "transactionDetailFlow"
                     Layout.fillWidth: true
