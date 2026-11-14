@@ -4,24 +4,11 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <qml/models/walletqmlmodel.h>
-#include <qml/backendexecutor.h>
 
-#include <common/messages.h>
-#include <qml/bitcoinamount.h>
-#include <qml/models/addresslistmodel.h>
-#include <qml/models/paymentrequest.h>
-#include <qml/models/psbtqmlmodel.h>
-#include <qml/models/receiverequestentry.h>
-#include <qml/models/receiverequesthistorymodel.h>
-#include <qml/models/sendrecipient.h>
-#include <qml/models/sendrecipientslistmodel.h>
-#include <qml/models/signverifymessagemodel.h>
-#include <qml/models/walletunlock.h>
-#include <qml/models/walletqmlmodeltransaction.h>
-#include <qml/models/transactionflow.h>
-#include <qml/util.h>
-
+#include <addresstype.h>
 #include <chainparams.h>
+#include <common/messages.h>
+#include <common/paymentdestination.h>
 #include <common/types.h>
 #include <consensus/amount.h>
 #include <interfaces/chain.h>
@@ -31,19 +18,32 @@
 #include <node/psbt.h>
 #include <node/transaction.h>
 #include <node/types.h>
-#include <addresstype.h>
 #include <outputtype.h>
 #include <policy/feerate.h>
 #include <policy/policy.h>
 #include <policy/truc_policy.h>
 #include <primitives/transaction.h>
 #include <psbt.h>
+#include <qml/backendexecutor.h>
+#include <qml/bitcoinamount.h>
 #include <qml/bitcoinunits.h>
+#include <qml/models/addresslistmodel.h>
+#include <qml/models/paymentrequest.h>
+#include <qml/models/psbtqmlmodel.h>
+#include <qml/models/receiverequestentry.h>
+#include <qml/models/receiverequesthistorymodel.h>
+#include <qml/models/sendrecipient.h>
+#include <qml/models/sendrecipientslistmodel.h>
+#include <qml/models/signverifymessagemodel.h>
+#include <qml/models/transactionflow.h>
+#include <qml/models/walletqmlmodeltransaction.h>
+#include <qml/models/walletunlock.h>
+#include <qml/util.h>
 #include <script/solver.h>
 #include <support/allocators/secure.h>
 #include <univalue.h>
-#include <util/result.h>
 #include <util/rbf.h>
+#include <util/result.h>
 #include <util/threadnames.h>
 #include <util/translation.h>
 #include <wallet/coincontrol.h>
@@ -68,8 +68,8 @@
 #include <limits>
 #include <optional>
 #include <string>
-#include <utility>
 #include <tuple>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -230,7 +230,7 @@ std::optional<CTxDestination> PreviewChangeDestination(const OutputType change_t
 void ApplyPreviewChangeDestination(wallet::CCoinControl& coin_control, const OutputType change_type)
 {
     if (const auto destination = PreviewChangeDestination(change_type)) {
-        coin_control.destChange = *destination;
+        coin_control.destChange = PaymentDestination{*destination};
     }
 }
 
@@ -252,6 +252,7 @@ std::vector<wallet::COutput> AvailableSendAllCoins(const wallet::CWallet& wallet
     EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
 {
     control.UnSelectAll();
+    control.m_silent_payments = false;
     wallet::CoinFilterParams filter;
     filter.min_amount = 0;
     filter.skip_locked = true;
@@ -281,10 +282,12 @@ bool TransactionSweepsAvailableFunds(interfaces::Wallet& wallet_interface, const
 util::Result<wallet::CreatedTransactionResult> CreateSendAllTransaction(
     interfaces::Wallet& wallet_interface,
     const std::vector<wallet::CRecipient>& recipients,
-    const wallet::CCoinControl& control, int remainder_index, bool sign)
+    const wallet::CCoinControl& control, int remainder_index, bool sign, bool estimate_only = false)
 {
     auto* wallet = wallet_interface.wallet();
-    if (!wallet || remainder_index < 0 || static_cast<size_t>(remainder_index) >= recipients.size()) {
+    const bool silent_payment = std::ranges::any_of(recipients, [](const auto& recipient) { return recipient.dest.IsSilentPayment(); });
+    if (!wallet || remainder_index < 0 || static_cast<size_t>(remainder_index) >= recipients.size() ||
+        (estimate_only && sign) || (silent_payment && recipients.size() != 1)) {
         return util::Error{Untranslated("Unable to prepare a send-all transaction.")};
     }
     LOCK(wallet->cs_wallet);
@@ -307,6 +310,7 @@ util::Result<wallet::CreatedTransactionResult> CreateSendAllTransaction(
     CMutableTransaction tx;
     tx.version = control.m_version;
     CAmount total{0};
+    wallet::OutputSet sp_input_coins;
     for (const auto& input : inputs) {
         const auto* source = wallet->GetWalletTx(input.hash);
         if (!source || input.n >= source->GetTx()->vout.size() || wallet->IsSpent(input)
@@ -316,12 +320,21 @@ util::Result<wallet::CreatedTransactionResult> CreateSendAllTransaction(
         if (wallet->GetTxDepthInMainChain(*source) == 0 && source->GetTx()->version == TRUC_VERSION) {
             return util::Error{Untranslated("Cannot spend an unconfirmed version 3 input in this transaction.")};
         }
+        if (silent_payment && !estimate_only) {
+            const auto& output = source->GetTx()->vout[input.n];
+            if (auto checked = wallet::CheckSilentPaymentsInput(*wallet, input, output); !checked) {
+                return util::Error{util::ErrorString(checked)};
+            }
+            sp_input_coins.insert(std::make_shared<wallet::COutput>(input, output,
+                                                                    /*depth=*/0, /*input_bytes=*/-1, /*solvable=*/true, /*safe=*/true,
+                                                                    /*time=*/0, /*from_me=*/false));
+        }
         total += source->GetTx()->vout[input.n].nValue;
         const uint32_t sequence = wallet->m_signal_rbf ? MAX_BIP125_RBF_SEQUENCE : CTxIn::MAX_SEQUENCE_NONFINAL;
         tx.vin.emplace_back(input, CScript{}, sequence);
     }
     CAmount fixed_amount{0};
-    std::set<CTxDestination> destinations;
+    std::set<PaymentDestination> destinations;
     for (size_t i = 0; i < recipients.size(); ++i) {
         const auto& recipient = recipients[i];
         if (!destinations.insert(recipient.dest).second) {
@@ -329,7 +342,13 @@ util::Result<wallet::CreatedTransactionResult> CreateSendAllTransaction(
         }
         const CAmount amount = static_cast<int>(i) == remainder_index ? 0 : recipient.nAmount;
         fixed_amount += amount;
-        tx.vout.emplace_back(amount, GetScriptForDestination(recipient.dest));
+        tx.vout.push_back(wallet::GetDummyTxOut(recipient.dest, amount));
+    }
+    if (silent_payment && !estimate_only) {
+        const auto outputs = wallet::CreateSilentPaymentsOutputs(*wallet,
+                                                                 {{0, *recipients.front().dest.GetSilentPaymentsDestination()}}, sp_input_coins);
+        if (!outputs) return util::Error{util::ErrorString(outputs)};
+        tx.vout.front().scriptPubKey = GetScriptForDestination(outputs->at(0));
     }
     const auto size = wallet::CalculateMaximumSignedTxSize(CTransaction(tx), wallet);
     if (size.vsize < 0) return util::Error{Untranslated("Unable to determine the transaction size.")};
@@ -389,7 +408,7 @@ std::optional<SendFeePreview> EstimateInsufficientSelectedInputsFee(
     CAmount send_amount{0};
     for (const auto& recipient : recipients) {
         send_amount += recipient.nAmount;
-        tx.vout.emplace_back(recipient.nAmount, GetScriptForDestination(recipient.dest));
+        tx.vout.push_back(wallet::GetDummyTxOut(recipient.dest, recipient.nAmount));
     }
     const auto size = wallet::CalculateMaximumSignedTxSize(CTransaction(tx), wallet, &control);
     if (size.vsize < 0) return std::nullopt;
@@ -403,9 +422,12 @@ std::optional<SendFeePreview> TryPreviewFee(interfaces::Wallet& wallet,
                                      const std::vector<wallet::CRecipient>& recipients,
                                      const wallet::CCoinControl& coin_control, int remainder_index = -1)
 {
-    const auto result = remainder_index >= 0
-        ? CreateSendAllTransaction(wallet, recipients, coin_control, remainder_index, /*sign=*/false)
-        : wallet.createTransaction(recipients, coin_control, /*sign=*/false, /*change_pos=*/std::nullopt);
+    // Fixed-amount SP output derivation requires private keys. Show its exact fee at review
+    // instead of unlocking the wallet while the user is editing the form.
+    if (remainder_index < 0 && std::ranges::any_of(recipients, [](const auto& recipient) { return recipient.dest.IsSilentPayment(); })) {
+        return std::nullopt;
+    }
+    const auto result = remainder_index >= 0 ? CreateSendAllTransaction(wallet, recipients, coin_control, remainder_index, /*sign=*/false, /*estimate_only=*/true) : wallet.createTransaction(recipients, coin_control, /*sign=*/false, /*change_pos=*/std::nullopt);
     if (!result) {
         return remainder_index < 0
             ? EstimateInsufficientSelectedInputsFee(wallet, recipients, coin_control)
@@ -492,12 +514,12 @@ std::optional<std::vector<wallet::CRecipient>> BuildRecipients(const SendRecipie
             return std::nullopt;
         }
 
-        const CTxDestination destination = DecodeDestination(recipient->address()->address().toStdString());
-        if (!IsValidDestination(destination)) {
+        const auto destination = PaymentDestination::FromString(recipient->address()->address().toStdString());
+        if (!destination || (destination->IsSilentPayment() && recipients.count() != 1)) {
             return std::nullopt;
         }
 
-        vec_send.push_back({destination, recipient->cAmount(), false});
+        vec_send.push_back({*destination, recipient->cAmount(), false});
     }
 
     if (vec_send.empty()) {
@@ -714,6 +736,13 @@ void WalletQmlModel::initializeFeeEstimator()
     m_fee_estimation_timer->setSingleShot(true);
     m_fee_estimation_timer->setInterval(FEE_ESTIMATE_DEBOUNCE_MS);
     connect(m_fee_estimation_timer, &QTimer::timeout, this, &WalletQmlModel::requestFeeEstimatesNow);
+    connect(m_send_recipients, &SendRecipientsListModel::validationChanged, this, [this] {
+        if (!m_maximum_recipient) return;
+        const auto recipients = m_send_recipients->recipients();
+        if (recipients.size() != 1 && std::ranges::any_of(recipients, [](const auto* recipient) { return recipient->isSilentPayment(); })) {
+            setMaximumRecipient(nullptr);
+        }
+    });
 }
 
 QString WalletQmlModel::balance() const
@@ -796,6 +825,8 @@ bool WalletQmlModel::sendDraftSweepsWallet() const
 void WalletQmlModel::useMaximum()
 {
     if (!m_wallet || !m_send_recipients || !m_send_recipients->currentRecipient()) return;
+    const auto recipients = m_send_recipients->recipients();
+    if (recipients.size() != 1 && std::ranges::any_of(recipients, [](const auto* recipient) { return recipient->isSilentPayment(); })) return;
     setMaximumRecipient(m_send_recipients->currentRecipient());
     scheduleFeeEstimates();
 }
@@ -2336,6 +2367,14 @@ bool WalletQmlModel::prepareTransactionInternal(std::optional<SecureString> pass
         return false;
     }
 
+    const bool silent_payment = std::ranges::any_of(*vec_send, [](const auto& recipient) { return recipient.dest.IsSilentPayment(); });
+    if (silent_payment && (m_wallet->privateKeysDisabled() || m_wallet->hasExternalSigner())) {
+        if (passphrase) QmlUtil::ClearSecureString(*passphrase);
+        //: Shown while preparing a Silent Payments transaction when the wallet cannot access local private keys.
+        setTransactionStatus(tr("This interface currently requires a wallet with local private keys to send silent payments."));
+        return false;
+    }
+
     if (!m_wallet->privateKeysDisabled() && m_wallet->isCrypted() && m_wallet->isLocked() && !passphrase.has_value()) {
         refreshSecurityState();
         setTransactionStatus(tr("Enter your wallet password to prepare this transaction."), true);
@@ -2354,6 +2393,7 @@ bool WalletQmlModel::prepareTransactionInternal(std::optional<SecureString> pass
     }
 
     wallet::CCoinControl coin_control{m_coin_control};
+    coin_control.m_silent_payments = silent_payment;
     ApplySelectedInputsPolicy(coin_control);
     if (m_custom_fee_enabled) {
         const auto custom_fee_rate_per_kvb = ParseCustomFeeRatePerKvB(m_custom_fee_rate, MinimumCustomFeeRatePerKvB(m_wallet.get()));
@@ -2372,7 +2412,8 @@ bool WalletQmlModel::prepareTransactionInternal(std::optional<SecureString> pass
     }
 
     CAmount balance = m_wallet->getAvailableBalance(coin_control);
-    if (!m_maximum_recipient && balance < total) {
+    // getAvailableBalance hides selected SP input errors; let transaction creation report them.
+    if (!m_maximum_recipient && !(silent_payment && coin_control.HasSelected()) && balance < total) {
         relock_guard.relock();
         setTransactionStatus(coin_control.HasSelected()
             ? tr("Selected inputs do not cover the amount plus fee")
@@ -2404,15 +2445,17 @@ bool WalletQmlModel::prepareTransactionInternal(std::optional<SecureString> pass
         m_current_transaction_can_broadcast = false;
         m_current_transaction_review_message.clear();
         m_current_transaction->setWtx(newTx);
-        if (!m_current_transaction->captureReviewedRecipients(*m_send_recipients)) {
+        if (!m_current_transaction->captureReviewedRecipients(*m_send_recipients, result->change_pos)) {
             delete m_current_transaction;
             m_current_transaction = nullptr;
             m_current_transaction_can_send = false;
             setTransactionStatus(tr("Unable to match the prepared transaction's recipients."));
             return false;
         }
+        m_current_transaction->setSilentPaymentsRecipients(wallet::GetSilentPaymentsDestinations(*vec_send, coin_control, *result));
         m_current_transaction->setTransactionFee(result->fee);
-        m_current_transaction->setReviewFeeDetails(feeTargetBlocks(), estimatedFeeRate());
+        const QString review_fee_rate = silent_payment ? QString::number(static_cast<double>(result->fee) / GetVirtualTransactionSize(*newTx), 'f', 3) : estimatedFeeRate();
+        m_current_transaction->setReviewFeeDetails(feeTargetBlocks(), review_fee_rate);
         if (m_maximum_recipient) {
             m_current_transaction->reassignAmounts(
                 result->change_pos ? static_cast<int>(*result->change_pos) : -1);
@@ -2671,7 +2714,28 @@ bool WalletQmlModel::sendTransactionInternal(std::optional<SecureString> passphr
         return false;
     }
 
-    m_wallet->commitTransaction(/*tx=*/signed_tx, /*messages=*/{});
+    const auto& sp_recipients = m_current_transaction->silentPaymentsRecipients();
+    if (!sp_recipients.empty()) {
+        if (m_current_transaction_source != CurrentTransactionSource::SendDraft) {
+            //: Prevents sending the same prepared Silent Payments transaction more than once.
+            setTransactionStatus(tr("This transaction has already been sent."));
+            return false;
+        }
+        auto* wallet = m_wallet->wallet();
+        if (!wallet) {
+            //: Error shown when the wallet backend cannot be accessed to send a Silent Payments transaction.
+            setTransactionStatus(tr("Unable to access the wallet to send this transaction."));
+            return false;
+        }
+        std::optional<std::string> comment;
+        if (const auto& labels = m_current_transaction->recipientLabels(); !labels.isEmpty()) comment = labels.first().toStdString();
+        // The wallet interface does not forward SP recipient metadata yet.
+        // TODO: Use interfaces::Wallet::commitTransaction once it supports SP recipients and comments.
+        wallet->CommitTransaction(signed_tx, /*replaces_txid=*/std::nullopt, comment,
+                                  /*comment_to=*/std::nullopt, /*messages=*/{}, /*payment_requests=*/{}, sp_recipients);
+    } else {
+        m_wallet->commitTransaction(/*tx=*/signed_tx, /*messages=*/{});
+    }
     saveSentRecipientLabels();
     m_current_transaction_source = CurrentTransactionSource::None;
 
@@ -2684,7 +2748,7 @@ void WalletQmlModel::saveSentRecipientLabels()
 {
     if (m_current_transaction_source != CurrentTransactionSource::SendDraft) return;
 
-    // Activity resolves outgoing notes through the address book, as the Qt
+    // Activity resolves ordinary outgoing notes through the address book, as the Qt
     // wallet does. Persist only user-provided notes after the transaction is
     // committed; do not relabel payment requests or write generated headings.
     for (auto it = m_current_transaction->recipientLabels().cbegin();
@@ -2750,6 +2814,10 @@ QString WalletQmlModel::saveCurrentTransactionAsPsbt(const QString& path)
     }
     if (!m_wallet || !m_current_transaction) {
         return tr("No transaction is prepared.");
+    }
+    if (!m_current_transaction->silentPaymentsRecipients().empty()) {
+        //: Error shown when attempting to save a prepared Silent Payments transaction as a PSBT file.
+        return tr("Saving silent payments as PSBT is not supported yet.");
     }
     CTransactionRef& current_tx = m_current_transaction->getWtx();
     if (!current_tx) {

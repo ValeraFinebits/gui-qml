@@ -20,6 +20,7 @@ ColumnLayout {
     readonly property bool sendingMaximum: root.wallet && root.recipient
         && root.wallet.maximumRecipient === root.recipient
     readonly property bool selectedCoins: root.wallet && root.wallet.coinsListModel.selectedCoinsCount > 0
+    readonly property bool silentPayment: root.recipient && root.recipient.isSilentPayment === true
     signal pasteRequested(string field)
     signal edited()
     signal removeRequested()
@@ -107,7 +108,7 @@ ColumnLayout {
         //: Without a selection, it selects all available coins first.
         actionText: root.selectedCoins
             ? qsTr("Use maximum from selected coins") : qsTr("Use maximum")
-        actionEnabled: root.wallet && !root.sendingMaximum
+        actionEnabled: root.wallet && !root.sendingMaximum && (!root.silentPayment || root.wallet.recipients.count === 1)
         actionObjectName: "sendUseMaximumButton"
         supportingText: !root.sendingMaximum ? "" : root.selectedCoins
             ? qsTr("Sending maximum from selected coins") : qsTr("Sending maximum available")
@@ -136,6 +137,7 @@ ColumnLayout {
         objectName: "sendNoteField"
         Layout.fillWidth: true
         label: qsTr("Note to self")
+        //: Supporting text recommending a private note to help identify a payment later.
         supportingText: qsTr("Recommended")
         labelSpacing: 6
         messageSpacing: 8
